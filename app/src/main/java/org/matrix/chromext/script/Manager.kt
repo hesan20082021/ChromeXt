@@ -131,8 +131,11 @@ object ScriptDbManager {
         }
         if (userAgents.contains(origin)) {
           val agent = userAgents.get(origin)
-          codes.add("Object.defineProperties(window.navigator,{userAgent:{value:'${agent}'}});")
-          webSettings?.invokeMethod(agent) { name == "setUserAgentString" }
+          if (agent != null) {
+            val quoted = JSONObject.quote(agent)
+            codes.add("Object.defineProperties(window.navigator,{userAgent:{value:${quoted}}});")
+            webSettings?.invokeMethod(agent) { name == "setUserAgentString" }
+          }
         }
         trustedPage = false
         runScripts = true

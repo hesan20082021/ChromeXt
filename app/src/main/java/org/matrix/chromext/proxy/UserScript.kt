@@ -2,6 +2,7 @@ package org.matrix.chromext.proxy
 
 import android.net.Uri
 import android.view.ContextThemeWrapper
+import java.lang.reflect.Field
 import java.lang.reflect.Modifier
 import org.matrix.chromext.Chrome
 import org.matrix.chromext.script.ScriptDbManager
@@ -144,14 +145,71 @@ object UserScriptProxy {
     } else if (packed::class.java == String::class.java) {
       return packed as String
     } else if (packed::class.java == loadUrlParams) {
-      val mUrl = loadUrlParams.getDeclaredField("a")
-      return mUrl.get(packed) as String
+      val url =
+          loadUrlParams.declaredFields
+              .asSequence()
+              .filter { it.type == String::class.java }
+              .onEach { it.isAccessible = true }
+              .mapNotNull { it.get(packed) as? String }
+              .firstOrNull { looksLikeUrl(it) }
+      return url
     } else if (packed::class.java == gURL) {
-      val mSpec = gURL.getDeclaredField("a")
-      return mSpec.get(packed) as String
+      val url =
+          gURL.declaredFields
+              .asSequence()
+              .filter { it.type == String::class.java }
+              .onEach { it.isAccessible = true }
+              .mapNotNull { it.get(packed) as? String }
+              .firstOrNull { looksLikeUrl(it) }
+      return url
     }
     Log.e("parseUrl: ${packed::class.java} is not ${loadUrlParams.name} nor ${gURL.name}")
     return null
+  }
+
+  private fun looksLikeUrl(value: String): Boolean {
+    val v = value.lowercase()
+    return v.startsWith("http://") ||
+        v.startsWith("https://") ||
+        v.startsWith("file://") ||
+        v.startsWith("content://") ||
+        v.startsWith("javascript:") ||
+        v.startsWith("chrome://") ||
+        v.startsWith("chrome-native://") ||
+        v.startsWith("edge://")
+  }
+
+  private val setVerbatimHeaders =
+      if (Chrome.isSamsung) {
+        null
+      } else {
+        findMethodOrNull(loadUrlParams, true) {
+          parameterTypes contentDeepEquals arrayOf(String::class.java) &&
+              returnType == Void.TYPE &&
+              name.contains("verbatim", true)
+        }
+      }
+
+  private fun findVerbatimHeadersField(urlParams: Any, url: String): Field? {
+    val fields = loadUrlParams.declaredFields.filter { it.type == String::class.java }
+    if (fields.isEmpty()) return null
+    val urlLower = url.lowercase()
+    fields.forEach { it.isAccessible = true }
+    return fields.firstOrNull {
+      val v = it.get(urlParams) as? String
+      if (v == null) return@firstOrNull true
+      val vl = v.lowercase()
+      vl == "" ||
+          !(vl.startsWith("http://") ||
+              vl.startsWith("https://") ||
+              vl.startsWith("file://") ||
+              vl.startsWith("content://") ||
+              vl.startsWith("javascript:") ||
+              vl.startsWith("chrome://") ||
+              vl.startsWith("chrome-native://") ||
+              vl.startsWith("edge://") ||
+              vl == urlLower)
+    } ?: fields.getOrNull(1)
   }
 
   fun userAgentHook(url: String, urlParams: Any): Boolean {
@@ -163,9 +221,12 @@ object UserScriptProxy {
         if (Chrome.isSamsung) {
           urlParams.invokeMethod(header) { name == "setVerbatimHeaders" }
         } else {
-          val mVerbatimHeaders =
-              loadUrlParams.declaredFields.filter { it.type == String::class.java }[1]
-          mVerbatimHeaders.set(urlParams, header)
+          if (setVerbatimHeaders != null) {
+            setVerbatimHeaders.invoke(urlParams, header)
+          } else {
+            val field = findVerbatimHeadersField(urlParams, url)
+            field?.set(urlParams, header)
+          }
         }
         return true
       }
