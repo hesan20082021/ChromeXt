@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.net.http.HttpResponseCache
+import java.lang.reflect.Modifier
 import org.matrix.chromext.BuildConfig
 import org.matrix.chromext.Chrome
 import org.matrix.chromext.Listener
@@ -102,46 +103,64 @@ object UserScriptHook : BaseHook() {
           .onFailure { if (BuildConfig.DEBUG) Log.ex(it) }
     }
 
-    findMethod(if (Chrome.isSamsung) proxy.tabImpl else proxy.tabWebContentsDelegateAndroidImpl) {
-          name == "onUpdateUrl" || name == "onUpdateTargetUrl"
-        }
+    val urlUpdateTarget =
+        if (Chrome.isSamsung) proxy.tabImpl else proxy.tabWebContentsDelegateAndroidImpl
+    val urlUpdateMethod =
+        findMethodOrNull(urlUpdateTarget) { name == "onUpdateUrl" || name == "onUpdateTargetUrl" }
+            ?: findMethod(urlUpdateTarget) {
+              parameterTypes.size == 1 &&
+                  parameterTypes[0] == proxy.gURL &&
+                  returnType == Void.TYPE &&
+                  !Modifier.isStatic(modifiers)
+            }
+    urlUpdateMethod
         // public void onUpdateTargetUrl(GURL url)
         .hookAfter {
           val tab = proxy.getTab(it.thisObject)!!
           if (!Chrome.isSamsung) Chrome.updateTab(tab)
-          var url = proxy.parseUrl(it.args[0])!!
+          var url = proxy.parseUrl(it.args[0]) ?: ""
           if (url.isEmpty() && proxy.getUrl != null) {
-            url = proxy.parseUrl(proxy.getUrl(tab))!!
+            url = proxy.parseUrl(proxy.getUrl(tab)) ?: ""
           }
+          if (url.isEmpty()) return@hookAfter
           val isLoading = proxy.mIsLoading.get(tab) as Boolean
           if (!url.startsWith("chrome") && isLoading) {
             ScriptDbManager.invokeScript(url)
           }
         }
 
-    findMethod(proxy.tabWebContentsDelegateAndroidImpl) {
+    val addMessageToConsole =
+        findMethodOrNull(proxy.tabWebContentsDelegateAndroidImpl) {
           name == if (Chrome.isSamsung) "onAddMessageToConsole" else "addMessageToConsole"
         }
-        // public boolean addMessageToConsole(int level, String message, int lineNumber,
-        // String sourceId)
-        .hookAfter {
-          // This should be the way to communicate with the front-end of ChromeXt
-          val lineNumber = it.args[2] as Int
-          val sourceId = it.args[3] as String
-          if (it.args[0] as Int == 0 &&
-              sourceId.startsWith("local://ChromeXt/init") &&
-              lineNumber == Local.anchorInChromeXt) {
-            Listener.startAction(it.args[1] as String, proxy.getTab(it.thisObject), null, sourceId)
-          } else {
-            Log.d(
-                when (it.args[0] as Int) {
-                  0 -> "D"
-                  2 -> "W"
-                  3 -> "E"
-                  else -> "V"
-                } + ": [${sourceId}@${lineNumber}] ${it.args[1]}")
-          }
-        }
+            ?: findMethod(proxy.tabWebContentsDelegateAndroidImpl) {
+              parameterTypes.count { it == String::class.java } >= 1 &&
+                  parameterTypes.count { it == Int::class.java } >= 1 &&
+                  !Modifier.isStatic(modifiers)
+            }
+    // public boolean addMessageToConsole(int level, String message, int lineNumber, String sourceId)
+    addMessageToConsole.hookAfter {
+      val ints = it.args.filterIsInstance<Int>()
+      val strings = it.args.filterIsInstance<String>()
+      val level = ints.firstOrNull() ?: 0
+      val lineNumber = ints.lastOrNull() ?: -1
+      val message = strings.firstOrNull() ?: return@hookAfter
+      val sourceId = strings.lastOrNull() ?: ""
+
+      if (level == 0 &&
+          sourceId.startsWith("local://ChromeXt/init") &&
+          lineNumber == Local.anchorInChromeXt) {
+        Listener.startAction(message, proxy.getTab(it.thisObject), null, sourceId)
+      } else {
+        Log.d(
+            when (level) {
+              0 -> "D"
+              2 -> "W"
+              3 -> "E"
+              else -> "V"
+            } + ": [${sourceId}@${lineNumber}] ${message}")
+      }
+    }
 
     findMethod(proxy.navigationControllerImpl) {
           name == "loadUrl" || parameterTypes contentDeepEquals arrayOf(proxy.loadUrlParams)

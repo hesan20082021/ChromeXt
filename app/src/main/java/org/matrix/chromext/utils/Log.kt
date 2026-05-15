@@ -38,6 +38,7 @@ object Log {
   fun ex(thr: Throwable, msg: String = "") {
     Log.e(TAG, msg, thr)
     XposedBridge.log("ChromeXt exception caught: [${msg}] " + thr.toString())
+    XposedBridge.log(thr)
   }
 
   fun toast(context: Context, msg: String) {
