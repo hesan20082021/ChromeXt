@@ -56,22 +56,30 @@ class MainHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
     Log.d(lpparam.processName + " started")
     if (lpparam.packageName == "org.matrix.chromext") return
     if (supportedPackages.contains(lpparam.packageName)) {
-      lpparam.classLoader
-          .loadClass("org.chromium.ui.base.WindowAndroid")
-          .declaredConstructors[1]
-          .hookAfter {
-            Chrome.init(it.args[0] as Context, lpparam.packageName)
-            initHooks(UserScriptHook)
-            if (ContextMenuHook.isInit) return@hookAfter
-            runCatching {
-                  if (!Chrome.isVivaldi) initHooks(PreferenceHook)
-                  initHooks(if (Chrome.isEdge || Chrome.isCocCoc) PageInfoHook else PageMenuHook)
+      runCatching {
+            val windowAndroid = lpparam.classLoader.loadClass("org.chromium.ui.base.WindowAndroid")
+            val constructors =
+                windowAndroid.declaredConstructors.filter {
+                  it.parameterTypes.any { t -> Context::class.java.isAssignableFrom(t) }
                 }
-                .onFailure {
-                  initHooks(ContextMenuHook)
-                  if (BuildConfig.DEBUG && !(Chrome.isSamsung || Chrome.isEdge)) Log.ex(it)
-                }
+            constructors.forEach { ctor ->
+              ctor.hookAfter {
+                val ctx = it.args.firstOrNull { arg -> arg is Context } as? Context ?: return@hookAfter
+                Chrome.init(ctx, lpparam.packageName)
+                initHooks(UserScriptHook)
+                if (ContextMenuHook.isInit) return@hookAfter
+                runCatching {
+                      if (!Chrome.isVivaldi) initHooks(PreferenceHook)
+                      initHooks(if (Chrome.isEdge || Chrome.isCocCoc) PageInfoHook else PageMenuHook)
+                    }
+                    .onFailure {
+                      initHooks(ContextMenuHook)
+                      Log.ex(it, "Init menu hooks failed")
+                    }
+              }
+            }
           }
+          .onFailure { Log.ex(it, "Hook WindowAndroid constructors failed") }
     } else {
       val ctx = AndroidAppHelper.currentApplication()
 
@@ -166,7 +174,8 @@ class MainHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
   private fun initHooks(vararg hook: BaseHook) {
     hook.forEach {
       if (it.isInit) return@forEach
-      it.init()
+      runCatching { it.init() }
+          .onFailure { thr -> Log.ex(thr, "${it.javaClass.simpleName} init failed") }
       if (it.isInit) Log.d("${it.javaClass.simpleName} hooked")
     }
   }
